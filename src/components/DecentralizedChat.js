@@ -15,7 +15,7 @@ import "gun/sea";
 
 // Try multiple public Gun relays as fallbacks when one is down or blocked
 const DEFAULT_PEERS = [
-  "http://localhost:8765/gun",
+  "https://reco-production-8190.up.railway.app/gun",
   "https://gunjs.herokuapp.com/gun",
   "https://gun-server.herokuapp.com/gun",
   "https://gun-manhattan.herokuapp.com/gun",
