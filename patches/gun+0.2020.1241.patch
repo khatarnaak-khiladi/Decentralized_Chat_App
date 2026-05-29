@@ -1,0 +1,54 @@
+diff --git a/node_modules/gun/gun.js b/node_modules/gun/gun.js
+index 61a749d..4238c88 100644
+--- a/node_modules/gun/gun.js
++++ b/node_modules/gun/gun.js
+@@ -2,10 +2,14 @@
+ 
+   /* UNBUILD */
+   function USE(arg, req){
+-    return req? require(arg) : arg.slice? USE[R(arg)] : function(mod, path){
+-      arg(mod = {exports: {}});
+-      USE[R(path)] = mod.exports;
+-    }
++    return req
++      ? (typeof require === 'function' ? eval("require")(arg) : undefined)
++      : arg.slice
++      ? USE[R(arg)]
++      : function(mod, path){
++          arg(mod = {exports: {}});
++          USE[R(path)] = mod.exports;
++        }
+     function R(p){
+       return p.split('/').slice(-1).toString().replace('.js','');
+     }
+diff --git a/node_modules/gun/sea.js b/node_modules/gun/sea.js
+index af22782..f42fdee 100644
+--- a/node_modules/gun/sea.js
++++ b/node_modules/gun/sea.js
+@@ -2,10 +2,14 @@
+ 
+   /* UNBUILD */
+   function USE(arg, req){
+-    return req? require(arg) : arg.slice? USE[R(arg)] : function(mod, path){
+-      arg(mod = {exports: {}});
+-      USE[R(path)] = mod.exports;
+-    }
++    return req
++      ? (typeof require === 'function' ? eval("require")(arg) : undefined)
++      : arg.slice
++      ? USE[R(arg)]
++      : function(mod, path){
++          arg(mod = {exports: {}});
++          USE[R(path)] = mod.exports;
++        }
+     function R(p){
+       return p.split('/').slice(-1).toString().replace('.js','');
+     }
+diff --git a/node_modules/gun/stats.radata b/node_modules/gun/stats.radata
+new file mode 100644
+index 0000000..611048b
+--- /dev/null
++++ b/node_modules/gun/stats.radata
+@@ -0,0 +1 @@
++{"all":{},"cpu":{"loadavg":[0,0,0],"stack":0,"system":18796000,"user":8843000},"dam":{"in":{"count":0,"done":0},"out":{"count":0,"done":0}},"memory":{"arrayBuffers":45015,"external":2191789,"freemem":892923904,"heapTotal":11223040,"heapUsed":10041384,"rss":8970240,"totalmem":6297477120},"node":{"count":3},"over":5013,"peers":{"count":0,"time":0},"rad":{"get":{"count":0,"time":{}},"put":{"count":0,"time":{}}},"stay":{},"up":{"count":1,"start":1779694108439,"time":120287.2995834}}nt":1,"start":1779694108439,"time":120287.2994304}}
+\ No newline at end of file

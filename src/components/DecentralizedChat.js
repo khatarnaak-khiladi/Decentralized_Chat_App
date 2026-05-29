@@ -1,215 +1,347 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Box, Typography, TextField, Button, IconButton } from "@mui/material";
+import {
+  Box,
+  Typography,
+  TextField,
+  Button,
+  IconButton,
+  Paper,
+} from "@mui/material";
 import SendIcon from "@mui/icons-material/Send";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import { useNavigate } from "react-router-dom";
-import Gun from "gun";
+import Gun from "gun/gun";
+import "gun/sea";
 
-// Default peer can be overridden in the UI before joining
-const DEFAULT_PEERS = ["https://gunjs.herokuapp.com/gun"];
-const gun = Gun({ peers: DEFAULT_PEERS });
+// Try multiple public Gun relays as fallbacks when one is down or blocked
+const DEFAULT_PEERS = [
+  "http://localhost:8765/gun",
+  "https://gunjs.herokuapp.com/gun",
+  "https://gun-server.herokuapp.com/gun",
+  "https://gun-manhattan.herokuapp.com/gun",
+];
 
-async function sha256Hex(text) {
-  const enc = new TextEncoder();
-  const data = enc.encode(text);
-  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+function generateSecret() {
+  return Math.random().toString(36).substring(2, 10).toUpperCase();
 }
 
 export default function DecentralizedChat() {
+  const [mode, setMode] = useState("create");
+  const [name, setName] = useState("");
   const [secret, setSecret] = useState("");
-  const [nick, setNick] = useState("");
-  const [joined, setJoined] = useState(false);
-  const [roomKey, setRoomKey] = useState("");
+  const [roomCode, setRoomCode] = useState("");
   const [messages, setMessages] = useState([]);
-  const [messageMap, setMessageMap] = useState({}); // id -> message
-  const [text, setText] = useState("");
-  const [typingUsers, setTypingUsers] = useState({});
-  const [peersInput, setPeersInput] = useState(() => {
-    try {
-      return localStorage.getItem("preferredPeers") || DEFAULT_PEERS.join(",");
-    } catch (e) {
-      return DEFAULT_PEERS.join(",");
-    }
-  });
-  const [availableRooms, setAvailableRooms] = useState([]);
-  const seen = useRef(new Set());
-  const navigate = useNavigate();
+  const [input, setInput] = useState("");
+  const [peerStatus, setPeerStatus] = useState("Waiting for peer...");
+  const [status, setStatus] = useState("Ready to connect.");
+  const [gun, setGun] = useState(null);
+  const [connected, setConnected] = useState(false);
+  const messageIds = useRef(new Set());
   const roomRef = useRef(null);
+  const messagesNodeRef = useRef(null);
+  const presenceNodeRef = useRef(null);
+  const ackNodeRef = useRef(null);
+  const listenerRef = useRef(null);
+  const presenceListenerRef = useRef(null);
+  const messageEndRef = useRef(null);
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    const saved = localStorage.getItem("preferredPeers");
+    const peers = saved
+      ? saved
+          .split(",")
+          .map((peer) => peer.trim())
+          .filter(Boolean)
+      : DEFAULT_PEERS;
+    try {
+      const g = Gun({ peers });
+      console.log("Gun initialized with peers:", peers);
+      setGun(g);
+    } catch (err) {
+      console.error("Failed to initialize Gun with peers:", peers, err);
+      setGun(Gun());
+    }
+  }, []);
 
   useEffect(() => {
     return () => {
-      // cleanup listeners if any
+      if (listenerRef.current?.off) {
+        listenerRef.current.off();
+      }
+      if (roomRef.current?.off) {
+        roomRef.current.off();
+      }
+      roomRef.current = null;
     };
   }, []);
 
-  const joinRoom = async () => {
-    if (!secret || !nick) return alert("Enter nickname and secret code to join.");
-    const key = await sha256Hex(secret.trim());
-    setRoomKey(key);
-    setJoined(true);
-    // allow dynamic peer override
-    try {
-      const peers = peersInput.split(",").map((p) => p.trim()).filter(Boolean);
-      if (peers.length) {
-        roomRef.current = Gun({ peers });
-      } else {
-        roomRef.current = gun;
-      }
-    } catch (e) {
-      roomRef.current = gun;
+  useEffect(() => {
+    messageEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
+  const openRoom = (code) => {
+    if (!name.trim() || !code.trim()) {
+      alert("Enter your name and a room code.");
+      return;
+    }
+    if (!gun) {
+      alert("Chat engine is not ready. Reload the page.");
+      return;
     }
 
-    const room = roomRef.current.get(`room/${key}`);
+    const roomSecret = code.trim().toUpperCase();
+    setRoomCode(roomSecret);
+    setSecret(roomSecret);
+    setConnected(true);
+    setStatus(`Connected to ${roomSecret}`);
+    setMessages([]);
+    messageIds.current.clear();
+    setPeerStatus("Waiting for peer...");
 
-    // Register this room in a simple public index (optional)
-    try {
-      const index = roomRef.current.get("rooms_index");
-      index.set({ key, ts: Date.now() });
-    } catch (e) {
-      // ignore
+    if (listenerRef.current?.off) {
+      listenerRef.current.off();
+      listenerRef.current = null;
     }
 
-    // Subscribe to messages, store by id and keep sorted order
-    room.map().on(async (data, id) => {
-      if (!data || !data.msg) return;
-      if (seen.current.has(id)) return; // dedupe quickly
-      seen.current.add(id);
+    roomRef.current = gun.get(`room/${roomSecret}`);
+    messagesNodeRef.current = roomRef.current.get("messages");
+    presenceNodeRef.current = roomRef.current.get("presence");
+    ackNodeRef.current = roomRef.current.get("acks");
+
+    if (presenceListenerRef.current?.off) {
+      presenceListenerRef.current.off();
+      presenceListenerRef.current = null;
+    }
+
+    presenceListenerRef.current = presenceNodeRef.current.map();
+    presenceListenerRef.current.on((data, id) => {
+      if (!data || !data.name) return;
+      if (data.name === name.trim()) return;
+      setPeerStatus(`Peer online: ${data.name}`);
+    });
+
+    const listener = messagesNodeRef.current.map();
+    listenerRef.current = listener;
+
+    if (ackNodeRef.current) {
+      ackNodeRef.current.map().on((ack, id) => {
+        if (!ack || !ack.messageId || ack.from === name.trim()) return;
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === ack.messageId ? { ...msg, delivered: true } : msg
+          )
+        );
+      });
+    }
+
+    listener.on(async (data, id) => {
+      if (!data || !data.msg || messageIds.current.has(id)) return;
+      messageIds.current.add(id);
       try {
-        const decrypted = await Gun.SEA.decrypt(data.msg, secret);
-        setMessageMap((prev) => {
-          const next = { ...prev, [id]: { id, from: data.from, message: decrypted, ts: data.ts || Date.now() } };
-          // convert to sorted array
-          const sorted = Object.values(next).sort((a, b) => (a.ts || 0) - (b.ts || 0));
-          setMessages(sorted);
-          return next;
+        const decrypted = await Gun.SEA.decrypt(data.msg, roomSecret);
+        setMessages((prev) => {
+          const next = [...prev, { id, from: data.from, text: decrypted, ts: data.ts || Date.now() }];
+          return next.sort((a, b) => (a.ts || 0) - (b.ts || 0));
         });
-      } catch (err) {
-        // decryption failed -> wrong secret or malformed message
+        if (data.from !== name.trim() && ackNodeRef.current) {
+          ackNodeRef.current.get(id).put({ messageId: id, from: name.trim(), ts: Date.now() });
+        }
+      } catch (error) {
+        console.warn("Decrypt failed for one message", error);
       }
     });
+      presenceNodeRef.current.get(name.trim()).put({ name: name.trim(), ts: Date.now() });
+  };
 
-    // Subscribe to typing updates for this room
-    const typingNode = roomRef.current.get(`room/${key}/typing`);
-    typingNode.on((obj) => {
-      if (!obj) return;
-      setTypingUsers((prev) => {
-        const now = Date.now();
-        const next = { ...prev, ...obj };
-        // cleanup old entries
-        Object.keys(next).forEach((u) => { if (now - next[u] > 5000) delete next[u]; });
-        return next;
-      });
-    });
-
-    // Subscribe to rooms index to show available rooms
-    try {
-      const index = roomRef.current.get("rooms_index");
-      index.map().on((item, id) => {
-        if (!item || !item.key) return;
-        setAvailableRooms((prev) => {
-          const found = prev.find((r) => r.key === item.key);
-          if (found) return prev;
-          return [{ key: item.key, ts: item.ts }, ...prev].slice(0, 20);
-        });
-      });
-    } catch (e) {
-      // ignore
+  const createRoom = () => {
+    if (!name.trim()) {
+      alert("Enter your name first.");
+      return;
     }
+    const code = generateSecret();
+    openRoom(code);
+    setStatus(`Room created: ${code}`);
+  };
+
+  const joinRoom = () => {
+    if (!name.trim() || !secret.trim()) {
+      alert("Enter your name and secret code.");
+      return;
+    }
+    openRoom(secret);
   };
 
   const sendMessage = async () => {
-    if (!text.trim() || !joined) return;
+    if (!input.trim() || !connected || !roomRef.current) return;
+    const content = input.trim();
+    const id = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    messageIds.current.add(id);
+    const addedMessage = { id, from: name.trim(), text: content, ts: Date.now() };
+    setMessages((prev) => [...prev, { ...addedMessage, delivered: false }].sort((a, b) => (a.ts || 0) - (b.ts || 0)));
+    setInput("");
+
     try {
-      const encrypted = await Gun.SEA.encrypt(text, secret);
-      const room = (roomRef.current || gun).get(`room/${roomKey}`);
-      const msgObj = { msg: encrypted, from: nick, ts: Date.now() };
-      room.set(msgObj);
-      // Local append via messageMap to keep ordering consistent
-      setMessageMap((prev) => {
-        const id = `local-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
-        const next = { ...prev, [id]: { id, from: nick, message: text, ts: msgObj.ts } };
-        const sorted = Object.values(next).sort((a, b) => (a.ts || 0) - (b.ts || 0));
-        setMessages(sorted);
-        return next;
-      });
-      setText("");
-    } catch (err) {
-      console.error("send error", err);
+      const encrypted = await Gun.SEA.encrypt(content, secret);
+      messagesNodeRef.current.get(id).put({ msg: encrypted, from: name.trim(), ts: addedMessage.ts });
+    } catch (error) {
+      console.error(error);
+      alert("Failed to send the message.");
     }
   };
 
-  // Publish typing heartbeat
-  useEffect(() => {
-    if (!joined || !roomKey) return;
-    const node = (roomRef.current || gun).get(`room/${roomKey}/typing`);
-    let interval = null;
-    if (text.trim()) {
-      node.put({ [nick]: Date.now() });
-      interval = setInterval(() => node.put({ [nick]: Date.now() }), 2000);
-    } else {
-      node.put({ [nick]: null });
-    }
-    return () => { if (interval) clearInterval(interval); node.put({ [nick]: null }); };
-  }, [text, joined, roomKey, nick]);
+  const copyCode = () => {
+    if (!roomCode) return;
+    navigator.clipboard?.writeText(roomCode);
+    setStatus("Room code copied to clipboard.");
+  };
 
   return (
-    <Box sx={{ p: 2, height: "100vh", display: "flex", flexDirection: "column" }}>
-      <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-        <IconButton onClick={() => navigate(-1)}>
-          <ArrowBackIcon />
-        </IconButton>
-        <Typography variant="h6">Decentralized Chat</Typography>
-      </Box>
+    <Box
+      sx={{
+        minHeight: "100vh",
+        p: 2,
+        background: "linear-gradient(180deg, #0b1730 0%, #151f37 100%)",
+        color: "#fff",
+      }}
+    >
+      <Paper
+        sx={{
+          maxWidth: 960,
+          mx: "auto",
+          p: { xs: 2, sm: 3 },
+          borderRadius: 4,
+          background: "rgba(12, 23, 51, 0.95)",
+          border: "1px solid rgba(255,255,255,0.08)",
+        }}
+        elevation={16}
+      >
+        <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 1, mb: 3 }}>
+          <Box>
+            <Typography variant="h4" sx={{ fontWeight: 800, letterSpacing: "0.08em" }}>
+              Secure Room Chat
+            </Typography>
+            <Typography variant="body2" sx={{ color: "rgba(255,255,255,0.7)", mt: 1 }}>
+              Create a private secret room or join an existing one. No duplicate messages, encryption enabled, timestamps included.
+            </Typography>
+          </Box>
+          <IconButton onClick={() => navigate("/")} sx={{ color: "#fff", border: "1px solid rgba(255,255,255,0.12)" }}>
+            <ArrowBackIcon />
+          </IconButton>
+        </Box>
 
-      {!joined ? (
-        <Box sx={{ mt: 3, display: "flex", flexDirection: "column", gap: 2, maxWidth: 640 }}>
-          <TextField label="Nickname" value={nick} onChange={(e) => setNick(e.target.value)} />
-          <TextField label="Secret Code" value={secret} onChange={(e) => setSecret(e.target.value)} />
-          <TextField label="Peers (comma-separated)" value={peersInput} onChange={(e) => setPeersInput(e.target.value)} helperText="Override default peers, e.g. http://localhost:8765/gun" />
-          <Box sx={{ display: 'flex', gap: 1 }}>
-            <Button variant="contained" onClick={joinRoom}>Join Room</Button>
-            <Button variant="outlined" onClick={() => { navigator.clipboard?.writeText(secret || ''); }}>Copy Secret</Button>
-          </Box>
-          <Typography variant="caption">Enter the same secret code to chat privately. Messages are encrypted with SEA; only users with the secret can decrypt them.</Typography>
-          {availableRooms.length > 0 && (
-            <Box sx={{ mt: 2 }}>
-              <Typography variant="subtitle2">Recent public room keys (may be incomplete):</Typography>
-              {availableRooms.map((r) => (
-                <Box key={r.key} sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-                  <Typography sx={{ fontFamily: 'monospace', fontSize: 12 }}>{r.key.slice(0,8)}...</Typography>
-                  <Button size="small" onClick={() => { navigator.clipboard?.writeText(r.key); }}>Copy</Button>
-                </Box>
-              ))}
+        {!connected ? (
+          <Box sx={{ display: "grid", gap: 2 }}>
+            <TextField
+              label="Your name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              fullWidth
+              sx={{ background: "rgba(255,255,255,0.08)", borderRadius: 2 }}
+            />
+            {mode === "join" && (
+              <TextField
+                label="Secret room code"
+                value={secret}
+                onChange={(e) => setSecret(e.target.value.toUpperCase())}
+                fullWidth
+                sx={{ background: "rgba(255,255,255,0.08)", borderRadius: 2 }}
+              />
+            )}
+            <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
+              <Button
+                variant={mode === "create" ? "contained" : "outlined"}
+                color="primary"
+                onClick={() => setMode("create")}
+                sx={{ flex: 1, minWidth: 140 }}
+              >
+                Create Room
+              </Button>
+              <Button
+                variant={mode === "join" ? "contained" : "outlined"}
+                color="secondary"
+                onClick={() => setMode("join")}
+                sx={{ flex: 1, minWidth: 140 }}
+              >
+                Join Room
+              </Button>
             </Box>
-          )}
-        </Box>
-      ) : (
-        <Box sx={{ display: "flex", flexDirection: "column", flex: 1, mt: 2 }}>
-          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <Typography variant="subtitle2">Room: <span style={{fontFamily:'monospace'}}>{roomKey?.slice(0,8)}...</span></Typography>
-            <Typography variant="caption" sx={{ color: 'gray' }}>{Object.keys(typingUsers).filter(u=>u && u!==nick).length ? `${Object.keys(typingUsers).filter(u=>u&&u!==nick).join(', ')} is typing...` : ''}</Typography>
+            <Button
+              variant="contained"
+              color="success"
+              onClick={mode === "create" ? createRoom : joinRoom}
+              sx={{ mt: 1, py: 1.5, fontWeight: 700 }}
+            >
+              {mode === "create" ? "Create secret room" : "Join with code"}
+            </Button>
+            <Typography sx={{ color: "rgba(255,255,255,0.75)", mt: 1 }}>
+              If you create a room, a unique secret room code will be generated immediately. The second user should enter their name and use the same code to join.
+            </Typography>
           </Box>
-          <Box sx={{ flex: 1, overflowY: "auto", mb: 1, display: 'flex', flexDirection: 'column', gap: 1 }}>
-            {messages.map((m, idx) => {
-              const isMe = m.from === nick;
-              return (
-                <Box key={m.id || idx} sx={{ display: 'flex', justifyContent: isMe ? 'flex-end' : 'flex-start' }}>
-                  <Box sx={{ maxWidth: '72%', backgroundColor: isMe ? '#4caf50' : '#e0e0e0', color: isMe ? '#fff' : '#000', p: 1.25, borderRadius: 2 }}>
-                    <Typography variant="caption" sx={{ color: isMe ? 'rgba(255,255,255,0.85)' : 'gray', display: 'block' }}>{m.from} • {new Date(m.ts).toLocaleTimeString()}</Typography>
-                    <Typography sx={{ whiteSpace: 'pre-wrap' }}>{m.message}</Typography>
-                  </Box>
-                </Box>
-              );
-            })}
+        ) : (
+          <Box sx={{ display: "grid", gap: 2 }}>
+            <Paper sx={{ p: 2, background: "rgba(255,255,255,0.06)", borderRadius: 3 }}>
+              <Typography sx={{ fontWeight: 700, mb: 1 }}>Connected as: {name}</Typography>
+              <Typography sx={{ wordBreak: "break-all" }}>
+                Room code: <strong>{roomCode}</strong>
+              </Typography>
+              <Button variant="outlined" size="small" sx={{ mt: 1 }} onClick={copyCode}>
+                Copy room code
+              </Button>
+              <Typography sx={{ mt: 1, color: "rgba(255,255,255,0.75)" }}>{peerStatus}</Typography>
+            </Paper>
+
+            <Paper sx={{ p: 2, background: "rgba(255,255,255,0.05)", minHeight: 420, maxHeight: 520, overflowY: "auto", borderRadius: 3 }}>
+              {messages.length === 0 ? (
+                <Typography sx={{ color: "rgba(255,255,255,0.7)" }}>
+                  No messages yet. Start the conversation.
+                </Typography>
+              ) : (
+                messages.map((message) => {
+                  const mine = message.from === name.trim();
+                  return (
+                    <Box key={message.id} sx={{ display: "flex", justifyContent: mine ? "flex-end" : "flex-start", mb: 1 }}>
+                      <Paper sx={{ p: 1.5, maxWidth: "75%", background: mine ? "#2e7d32" : "rgba(255,255,255,0.08)", color: mine ? "#fff" : "#fff", borderRadius: 3 }}>
+                        <Typography variant="caption" sx={{ opacity: 0.8, display: "block", mb: 0.5 }}>
+                          {message.from} • {new Date(message.ts).toLocaleTimeString()}
+                        </Typography>
+                        {mine && (
+                          <Typography variant="caption" sx={{ opacity: 0.7, display: "block", mb: 0.5, textAlign: "right" }}>
+                            {message.delivered ? "Delivered" : "Sent"}
+                          </Typography>
+                        )}
+                        <Typography>{message.text}</Typography>
+                      </Paper>
+                    </Box>
+                  );
+                })
+              )}
+              <div ref={messageEndRef} />
+            </Paper>
+
+            <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
+              <TextField
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                placeholder="Write your message..."
+                fullWidth
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    sendMessage();
+                  }
+                }}
+                sx={{ background: "rgba(255,255,255,0.08)", borderRadius: 2 }}
+              />
+              <IconButton color="primary" onClick={sendMessage} sx={{ background: "rgba(255,255,255,0.08)", borderRadius: 2, p: 1.5 }}>
+                <SendIcon />
+              </IconButton>
+            </Box>
           </Box>
-          <Box sx={{ display: "flex", gap: 1 }}>
-            <TextField fullWidth value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") sendMessage(); }} />
-            <IconButton onClick={sendMessage} color="primary"><SendIcon /></IconButton>
-          </Box>
-        </Box>
-      )}
+        )}
+
+        <Typography sx={{ mt: 3, color: "rgba(255,255,255,0.65)" }}>{status}</Typography>
+      </Paper>
     </Box>
   );
 }
